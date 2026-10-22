@@ -38,6 +38,7 @@ public class KaleController : ControllerBase
         Version = typeof(KaleController).Assembly.GetName().Version?.ToString(),
         Repairs = new[] { "defaultAudio" },
         Requests = new { Configured = Plugin.Instance?.Configuration.Seerr is not null },
+        Share = new { Grants = true },
     };
 
     /// <summary>Would making this audio stream the default work? Reads the file; writes nothing.</summary>

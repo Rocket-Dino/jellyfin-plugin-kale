@@ -1,7 +1,9 @@
 using System;
+using System.Collections.Generic;
 using System.Text.Json.Serialization;
 using System.Xml.Serialization;
 using Jellyfin.Plugin.Kale.Requests;
+using Jellyfin.Plugin.Kale.Share;
 using MediaBrowser.Model.Plugins;
 
 namespace Jellyfin.Plugin.Kale.Configuration;
@@ -30,6 +32,13 @@ public class PluginConfiguration : BasePluginConfiguration
         !string.IsNullOrWhiteSpace(SeerrApiKey) && Uri.TryCreate(SeerrUrl, UriKind.Absolute, out var uri)
             ? new SeerrSettings(uri, SeerrApiKey)
             : null;
+
+    /// <summary>
+    /// Kale Share invitations' sign-ins (kale#331): hashes only, never a secret. Kept out of Jellyfin's
+    /// <c>GET /Plugins/{id}/Configuration</c>; the owner's app lists them through <c>/Kale/Share/Grants</c>.
+    /// </summary>
+    [JsonIgnore]
+    public List<ShareGrant> ShareGrants { get; set; } = new();
 
     /// <summary>Read-merge-write: set the two Seerr fields on THIS configuration, keep everything else.</summary>
     public PluginConfiguration WithSeerr(string url, string apiKey)

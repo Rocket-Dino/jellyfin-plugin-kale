@@ -2,6 +2,7 @@ using System;
 using System.Net.Http;
 using Jellyfin.Plugin.Kale.Repair;
 using Jellyfin.Plugin.Kale.Requests;
+using Jellyfin.Plugin.Kale.Share;
 using MediaBrowser.Controller;
 using MediaBrowser.Controller.Plugins;
 using Microsoft.Extensions.DependencyInjection;
@@ -15,6 +16,17 @@ public class PluginServiceRegistrator : IPluginServiceRegistrator
     {
         serviceCollection.AddSingleton<DefaultAudioRepair>();
         serviceCollection.AddSingleton<MemberRulesSource>();
+        serviceCollection.AddSingleton(_ => new ShareGrants(
+            () => Plugin.Instance?.Configuration.ShareGrants ?? new(),
+            grants =>
+            {
+                if (Plugin.Instance is { } plugin)
+                {
+                    plugin.Configuration.ShareGrants = grants;
+                    plugin.SaveConfiguration();
+                }
+            },
+            () => DateTime.UtcNow));
         // The broker's own connection pool: Seerr is one host on the LAN, and recycling connections
         // keeps a changed address (DNS) from pinning a dead one.
         serviceCollection.AddSingleton(sp => new SeerrBroker(
