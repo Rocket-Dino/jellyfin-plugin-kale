@@ -30,6 +30,15 @@ public class DiscoveryRulesTests
         ("PG-13", 13), ("TV-14", 14), ("R", 17), ("TV-MA", 17), ("NC-17", 18), ("Unrated", null),
     });
 
+    // The AU ladder as 12.1 and 10.11.11 publish it with the server set to AU (measured 2026-10-11):
+    // PG, M and MA15+ share score 15 and only the sub-score tells them apart (kale#311).
+    private static CertificationLadder AuLadder() => new(new (string, int?, int?)[]
+    {
+        ("G", 0, 0), ("Exempt", 0, 0), ("7+", 7, 0), ("10", 10, null), ("13", 13, null), ("14", 14, null),
+        ("PG", 15, 1), ("M", 15, 2), ("MA", 15, 3), ("MA15+", 15, 3), ("MA 15+", 15, 3),
+        ("16+", 16, 0), ("R", 18, 1), ("R18+", 18, 1), ("Unrated", null, null),
+    });
+
     [Fact]
     public void NoKeysIsUnsetAndSearchStaysOn()
     {
@@ -87,15 +96,15 @@ public class DiscoveryRulesTests
         var scope = DiscoveryScope.Applied(DiscoveryLimits.FromCustomPrefs(Prefs()), libraryMaxScore: null);
         Assert.Null(scope.MaxRatingScore);
         Assert.False(scope.AdmitsNothingFromSearch);
-        Assert.True(scope.Admits(null, UsLadder().ScoresByName));
-        Assert.True(scope.Admits("NC-17", UsLadder().ScoresByName));
+        Assert.True(scope.Admits(null, UsLadder().LevelsByName));
+        Assert.True(scope.Admits("NC-17", UsLadder().LevelsByName));
     }
 
     [Fact]
     public void ACappedScopeAdmitsByScoreAndTreatsUnknownNamesAsUnrated()
     {
         var scope = new DiscoveryScope(10, ShowsUnrated: false);
-        var names = UsLadder().ScoresByName;
+        var names = UsLadder().LevelsByName;
         Assert.True(scope.Admits("PG", names));
         Assert.False(scope.Admits("PG-13", names));
         Assert.False(scope.Admits(null, names));
@@ -114,8 +123,57 @@ public class DiscoveryRulesTests
         // No film certificate at 14: fall DOWN to PG-13, never up to R.
         Assert.Equal("PG-13", ladder.CertificationFor(14, MediaKind.Movie));
         Assert.Null(new CertificationLadder(new (string, int?)[] { ("R", 17) }).CertificationFor(10, MediaKind.Movie));
-        Assert.Equal(13, ladder.ScoresByName["PG-13"]);
-        Assert.False(ladder.ScoresByName.ContainsKey("Unrated"));
+        Assert.Equal(13, ladder.LevelsByName["PG-13"].Score);
+        Assert.False(ladder.LevelsByName.ContainsKey("Unrated"));
+    }
+
+    [Fact]
+    public void APgCapIsFifteenPointOneAndRefusesM()
+    {
+        // The library cap jellyfin-web (and now Kale) writes for PG.
+        var rules = new MemberRules(DiscoveryLimits.FromCustomPrefs(Prefs()), libraryMaxScore: 15, AuLadder(), "AU", librarySubScore: 1);
+        Assert.Equal("PG", rules.Browse(MediaKind.Movie, null, null).Certification);
+        // Asking for M under it is widening, so the server's PG goes out instead.
+        Assert.Equal("PG", rules.Browse(MediaKind.Movie, "M", "AU").Certification);
+        Assert.Null(rules.RefuseDetail("PG"));
+        Assert.Equal("aboveLimit", rules.RefuseDetail("M")?.Outcome);
+        Assert.Equal("aboveLimit", rules.RefuseRequest("MA15+")?.Outcome);
+        Assert.Null(rules.RefuseRequest("G"));
+    }
+
+    [Fact]
+    public void TheDiscoverySubScoreIsReadFromItsOwnKeyAndTightensTheCap()
+    {
+        var limits = DiscoveryLimits.FromCustomPrefs(Prefs((DiscoveryLimits.CapKey, "15"), (DiscoveryLimits.SubKey, "1")));
+        Assert.Equal(new RatingLevel(15, 1), limits.Cap);
+        // Under a library MA15+ (15.3) the stored PG is the stricter: a score alone calls it a tie.
+        var scope = DiscoveryScope.Applied(limits, libraryMaxScore: 15, librarySubScore: 3);
+        Assert.Equal(new RatingLevel(15, 1), scope.Cap);
+        // A sub-score with no cap is not a cap.
+        Assert.Null(DiscoveryLimits.FromCustomPrefs(Prefs((DiscoveryLimits.SubKey, "1"))).Cap);
+    }
+
+    [Fact]
+    public void ABareFifteenSavedBeforeSubScoresBrowsesAtPg()
+    {
+        // Kale before kale#311 stored AU's PG as 15. Falling below the server's own reading of that
+        // would send the generic 14, which TMDB's AU list lacks; it used to send M.
+        var rules = new MemberRules(DiscoveryLimits.FromCustomPrefs(Prefs((DiscoveryLimits.CapKey, "15"))), null, AuLadder(), "AU");
+        Assert.Equal("PG", rules.Browse(MediaKind.Movie, null, null).Certification);
+        Assert.Equal("aboveLimit", rules.RefuseDetail("M")?.Outcome);
+    }
+
+    [Fact]
+    public void ContentDescriptorVariantsAreNeverSent()
+    {
+        var us = new CertificationLadder(new (string, int?, int?)[]
+        {
+            ("TV-PG", 10, 0), ("TV-PG-D", 10, 1), ("TV-14", 14, 0), ("TV-14-D", 14, 1), ("R", 17, 0), ("NC-17", 17, 1), ("TV-MA", 17, 1),
+        });
+        Assert.Equal("TV-PG", us.CertificationFor(new RatingLevel(10, 1), MediaKind.Series));
+        Assert.Equal("TV-14", us.CertificationFor(new RatingLevel(14, 1), MediaKind.Series));
+        Assert.Equal("R", us.CertificationFor(new RatingLevel(17, 0), MediaKind.Movie));
+        Assert.Equal("TV-MA", us.CertificationFor(17, MediaKind.Series));
     }
 
     [Fact]

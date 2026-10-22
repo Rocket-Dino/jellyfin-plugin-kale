@@ -13,13 +13,56 @@ public enum MediaKind
 }
 
 /// <summary>
+/// A place on the server's rating ladder: score and sub-score — a port of the app's <c>RatingLevel</c>
+/// (kale#311). AU's PG, M and MA15+ all score 15 and differ only in sub-score (15.1, 15.2, 15.3), so a
+/// score alone cannot tell them apart. A missing sub-score compares as 0, the server's own list rule.
+/// </summary>
+public readonly record struct RatingLevel(int Score, int? SubScore = null)
+{
+    /// <summary>Whether a title at <paramref name="level"/> is within this level, read as a cap.</summary>
+    public bool Admits(RatingLevel level) =>
+        level.Score < Score || (level.Score == Score && (level.SubScore ?? 0) <= (SubScore ?? 0));
+
+    /// <summary>Strictly below <paramref name="other"/> in the server's order.</summary>
+    public bool IsBelow(RatingLevel other) => !Admits(other);
+
+    /// <summary>The stricter of two caps (null = none); on a tie the one carrying a sub-score.</summary>
+    public static RatingLevel? Stricter(RatingLevel? a, RatingLevel? b)
+    {
+        if (a is not { } x)
+        {
+            return b;
+        }
+
+        if (b is not { } y)
+        {
+            return a;
+        }
+
+        if (x.IsBelow(y))
+        {
+            return x;
+        }
+
+        if (y.IsBelow(x))
+        {
+            return y;
+        }
+
+        return x.SubScore is not null ? x : y;
+    }
+}
+
+/// <summary>
 /// A member's discovery limits, read from their own <c>DisplayPreferences</c> custom prefs
 /// (<c>usersettings</c>, client <c>kale</c>) — a port of the app's <c>DiscoveryLimits(customPrefs:)</c>,
 /// key for key, so the broker and the app can never read the same row differently.
 /// </summary>
-public sealed record DiscoveryLimits(int? MaxRatingScore, bool ShowsUnrated, bool IsStored, bool SearchesBeyondLibrary)
+public sealed record DiscoveryLimits(int? MaxRatingScore, bool ShowsUnrated, bool IsStored, bool SearchesBeyondLibrary, int? MaxSubRatingScore = null)
 {
     public const string CapKey = "kale-discovery-max-rating";
+    /// <summary>The cap's sub-score, under its own key so an integer parse of <see cref="CapKey"/> still works (kale#311).</summary>
+    public const string SubKey = "kale-discovery-max-subrating";
     public const string UnratedKey = "kale-discovery-show-unrated";
     public const string SearchKey = "kale-discovery-search";
     public const string Client = "kale";
@@ -30,119 +73,141 @@ public sealed record DiscoveryLimits(int? MaxRatingScore, bool ShowsUnrated, boo
         prefs.TryGetValue(CapKey, out var capText);
         prefs.TryGetValue(UnratedKey, out var unratedText);
         prefs.TryGetValue(SearchKey, out var searchText);
+        prefs.TryGetValue(SubKey, out var subText);
         int? cap = int.TryParse(capText, System.Globalization.NumberStyles.Integer, System.Globalization.CultureInfo.InvariantCulture, out var c) ? c : null;
+        int? sub = cap is not null && int.TryParse(subText, System.Globalization.NumberStyles.Integer, System.Globalization.CultureInfo.InvariantCulture, out var d) ? d : null;
         // Both keys absent means UNSET, not "no cap chosen": only Kale's own key is evidence.
         bool stored = prefs.ContainsKey(CapKey) || prefs.ContainsKey(UnratedKey);
         // Absent-but-capped falls to the SAFE side: unrated hidden.
         bool showsUnrated = unratedText is null ? cap is null : unratedText == "true";
         // Only the literal "false" turns search off (a privacy preference; a child is capped anyway).
-        return new DiscoveryLimits(cap, showsUnrated, stored, searchText != "false");
+        return new DiscoveryLimits(cap, showsUnrated, stored, searchText != "false", sub);
     }
+
+    public RatingLevel? Cap => MaxRatingScore is { } s ? new RatingLevel(s, MaxSubRatingScore) : null;
 }
 
 /// <summary>The scope actually applied: the app's <c>DiscoveryScope.applied(discovery:library:)</c>.</summary>
-public sealed record DiscoveryScope(int? MaxRatingScore, bool ShowsUnrated)
+public sealed record DiscoveryScope(int? MaxRatingScore, bool ShowsUnrated, int? MaxSubRatingScore = null)
 {
-    public static DiscoveryScope Applied(DiscoveryLimits discovery, int? libraryMaxScore)
+    public RatingLevel? Cap => MaxRatingScore is { } s ? new RatingLevel(s, MaxSubRatingScore) : null;
+
+    public static DiscoveryScope Applied(DiscoveryLimits discovery, int? libraryMaxScore, int? librarySubScore = null)
     {
+        RatingLevel? library = libraryMaxScore is { } l ? new RatingLevel(l, librarySubScore) : null;
         if (!discovery.IsStored)
         {
             // Derived from the library cap: a cap hides unrated.
-            return new DiscoveryScope(libraryMaxScore, libraryMaxScore is null);
+            return new DiscoveryScope(library?.Score, library is null, library?.SubScore);
         }
 
-        int? cap = (discovery.MaxRatingScore, libraryMaxScore) switch
-        {
-            ({ } mine, { } theirs) => Math.Min(mine, theirs),
-            ({ } mine, null) => mine,
-            (null, { } theirs) => theirs,
-            _ => null,
-        };
+        // Score AND sub-score: a stored PG (15.1) under a library MA15+ (15.3) is the stricter one.
+        var cap = RatingLevel.Stricter(discovery.Cap, library);
         // Stricter only: a library cap implies unrated hidden, and a stored "show" can't undo it.
-        bool libraryHidesUnrated = libraryMaxScore is not null;
-        return new DiscoveryScope(cap, cap is null || (discovery.ShowsUnrated && !libraryHidesUnrated));
+        bool libraryHidesUnrated = library is not null;
+        return new DiscoveryScope(cap?.Score, cap is null || (discovery.ShowsUnrated && !libraryHidesUnrated), cap?.SubScore);
     }
 
     /// <summary>A capped scope admits nothing from search: TMDB's multi-search carries no ratings.</summary>
     public bool AdmitsNothingFromSearch => MaxRatingScore is not null && !ShowsUnrated;
 
     /// <summary>Whether a title with this certification may be shown. An unknown name is UNRATED.</summary>
-    public bool Admits(string? certification, IReadOnlyDictionary<string, int> scoresByName)
+    public bool Admits(string? certification, IReadOnlyDictionary<string, RatingLevel> levelsByName)
     {
-        if (MaxRatingScore is not { } cap)
+        if (Cap is not { } cap)
         {
             return true;
         }
 
-        if (certification is null || !scoresByName.TryGetValue(certification, out var score))
+        if (certification is null || !levelsByName.TryGetValue(certification, out var level))
         {
             return ShowsUnrated;
         }
 
-        return score <= cap;
+        return cap.Admits(level);
     }
 }
 
 /// <summary>
-/// Jellyfin's rating SCORE → the certification NAME TMDB wants, per kind — a port of the app's
-/// <c>CertificationLadder</c>. A <c>TV-</c> prefix is television; shortest name per score wins,
-/// ties alphabetical; a score with no exact name falls DOWN to the next one below.
+/// Jellyfin's rating LEVEL → the certification NAME TMDB wants, per kind — a port of the app's
+/// <c>CertificationLadder</c>. A <c>TV-</c> prefix is television; a content-descriptor variant
+/// (<c>TV-PG-D</c>, another name at the same score plus a separator) is never a candidate; shortest
+/// name per level wins, ties alphabetical; the highest name the cap admits, so a level with no exact
+/// name falls DOWN. A cap with no sub-score names the strictest certificate AT its score (AU's
+/// pre-kale#311 bare 15 → PG, not the generic 14 TMDB's AU list lacks).
 /// </summary>
 public sealed class CertificationLadder
 {
-    private readonly Dictionary<int, string> _films = new();
-    private readonly Dictionary<int, string> _television = new();
+    private readonly Dictionary<RatingLevel, string> _films = new();
+    private readonly Dictionary<RatingLevel, string> _television = new();
 
     public CertificationLadder(IEnumerable<(string Name, int? Score)> ratings)
+        : this(ratings.Select(r => (r.Name, r.Score, (int?)null)))
     {
-        foreach (var (name, score) in ratings)
+    }
+
+    public CertificationLadder(IEnumerable<(string Name, int? Score, int? SubScore)> ratings)
+    {
+        var scored = ratings
+            .Where(r => r.Score is not null && !string.IsNullOrEmpty(r.Name))
+            .Select(r => (r.Name, Level: new RatingLevel(r.Score!.Value, r.SubScore)))
+            .ToList();
+        foreach (var (name, level) in scored)
         {
-            if (score is not { } s || string.IsNullOrEmpty(name))
+            if (scored.Any(o => o.Level.Score == level.Score && o.Name != name && name.StartsWith(o.Name + "-", StringComparison.Ordinal)))
             {
                 continue;
             }
 
             var target = name.StartsWith("TV-", StringComparison.OrdinalIgnoreCase) ? _television : _films;
+            var key = new RatingLevel(level.Score, level.SubScore ?? 0);
             // Shortest name wins (the canonical one); ties break alphabetically, so the answer
             // never depends on the order the server listed them in.
-            if (target.TryGetValue(s, out var existing)
+            if (target.TryGetValue(key, out var existing)
                 && (existing.Length < name.Length || (existing.Length == name.Length && string.CompareOrdinal(existing, name) <= 0)))
             {
                 continue;
             }
 
-            target[s] = name;
+            target[key] = name;
         }
 
-        var names = new Dictionary<string, int>(StringComparer.Ordinal);
-        foreach (var (s, n) in _films)
+        var names = new Dictionary<string, RatingLevel>(StringComparer.Ordinal);
+        foreach (var (l, n) in _films)
         {
-            names[n] = s;
+            names[n] = l;
         }
 
-        foreach (var (s, n) in _television)
+        foreach (var (l, n) in _television)
         {
-            names[n] = s;
+            names[n] = l;
         }
 
-        ScoresByName = names;
+        LevelsByName = names;
     }
 
-    public IReadOnlyDictionary<string, int> ScoresByName { get; }
+    public IReadOnlyDictionary<string, RatingLevel> LevelsByName { get; }
 
     /// <summary>The certificate for a cap, or null when this ladder can't express it (then: no browse).</summary>
-    public string? CertificationFor(int score, MediaKind kind)
+    public string? CertificationFor(RatingLevel cap, MediaKind kind)
     {
         var ladder = kind == MediaKind.Movie ? _films : _television;
-        if (ladder.TryGetValue(score, out var exact))
+        if (cap.SubScore is null)
         {
-            return exact;
+            var atScore = ladder.Keys.Where(k => k.Score == cap.Score).OrderBy(k => k.SubScore ?? 0).ToList();
+            if (atScore.Count > 0)
+            {
+                return ladder[atScore[0]];
+            }
         }
 
         // Fall DOWN, never up: stricter than asked is safe, looser is the harm.
-        var below = ladder.Keys.Where(k => k <= score).ToList();
-        return below.Count == 0 ? null : ladder[below.Max()];
+        var admitted = ladder.Keys.Where(cap.Admits).OrderBy(k => k.Score).ThenBy(k => k.SubScore ?? 0).ToList();
+        return admitted.Count == 0 ? null : ladder[admitted[^1]];
     }
+
+    /// <summary>A cap given as a score alone.</summary>
+    public string? CertificationFor(int score, MediaKind kind) => CertificationFor(new RatingLevel(score), kind);
 }
 
 /// <summary>Reads a title's certification for one country out of Seerr's movie/tv detail body.</summary>
@@ -226,10 +291,10 @@ public static class SeerrState
 /// </summary>
 public sealed class MemberRules
 {
-    public MemberRules(DiscoveryLimits limits, int? libraryMaxScore, CertificationLadder ladder, string country)
+    public MemberRules(DiscoveryLimits limits, int? libraryMaxScore, CertificationLadder ladder, string country, int? librarySubScore = null)
     {
         Limits = limits;
-        Scope = DiscoveryScope.Applied(limits, libraryMaxScore);
+        Scope = DiscoveryScope.Applied(limits, libraryMaxScore, librarySubScore);
         Ladder = ladder;
         Country = string.IsNullOrEmpty(country) ? "US" : country;
     }
@@ -267,7 +332,7 @@ public sealed class MemberRules
             return (BrokerRefusal.SearchOff, null, null);
         }
 
-        if (Scope.MaxRatingScore is not { } cap)
+        if (Scope.Cap is not { } cap)
         {
             // Uncapped: the app may filter however it likes.
             return (null, requestedCertification, requestedCertification is null ? null : (requestedCountry ?? Country));
@@ -280,10 +345,10 @@ public sealed class MemberRules
             return (BrokerRefusal.BrowseCapped, null, null);
         }
 
-        var serverScore = Ladder.ScoresByName[server];
+        var serverLevel = Ladder.LevelsByName[server];
         if (requestedCertification is not null
-            && Ladder.ScoresByName.TryGetValue(requestedCertification, out var asked)
-            && asked < serverScore
+            && Ladder.LevelsByName.TryGetValue(requestedCertification, out var asked)
+            && asked.IsBelow(serverLevel)
             && Ladder.CertificationFor(asked, kind) == requestedCertification)
         {
             return (null, requestedCertification, Country);
@@ -295,15 +360,15 @@ public sealed class MemberRules
     /// <summary>Detail: refused only when the title's rating is KNOWN and above the cap.</summary>
     public BrokerRefusal? RefuseDetail(string? certification)
     {
-        if (Scope.MaxRatingScore is not { } cap || certification is null || !Ladder.ScoresByName.TryGetValue(certification, out var score))
+        if (Scope.Cap is not { } cap || certification is null || !Ladder.LevelsByName.TryGetValue(certification, out var level))
         {
             return null;
         }
 
-        return score > cap ? BrokerRefusal.AboveLimit : null;
+        return cap.Admits(level) ? null : BrokerRefusal.AboveLimit;
     }
 
     /// <summary>Request: allowed only when the scope admits the title (unrated counts as unknown).</summary>
     public BrokerRefusal? RefuseRequest(string? certification) =>
-        Scope.Admits(certification, Ladder.ScoresByName) ? null : BrokerRefusal.AboveLimit;
+        Scope.Admits(certification, Ladder.LevelsByName) ? null : BrokerRefusal.AboveLimit;
 }

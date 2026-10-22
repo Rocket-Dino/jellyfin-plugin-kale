@@ -1,4 +1,5 @@
 using System;
+using System.IO;
 using Jellyfin.Plugin.Kale.Configuration;
 using MediaBrowser.Common.Configuration;
 using MediaBrowser.Common.Plugins;
@@ -27,5 +28,29 @@ public class Plugin : BasePlugin<PluginConfiguration>
     public override Guid Id => PluginId;
 
     public override string Description =>
-        "Lets the Kale app fix a file's default soundtrack in place, and lets everyone in the household ask for films and shows through Seerr without signing in on each device.";
+        "Optional extras for the Kale app: requests through Seerr without signing in on each device, and fixing a "
+        + "file's default soundtrack in place. Kale works without it.";
+
+    /// <summary>
+    /// Uninstalling takes the configuration with it: it holds Seerr's API key and the invitation
+    /// sign-ins' hashes, which must not outlive the plugin that guarded them. Jellyfin deletes the
+    /// plugin's folder but leaves <c>plugins/configurations/Jellyfin.Plugin.Kale.xml</c> behind.
+    /// Undo records for soundtrack fixes are kept (they hold no secret, and a reinstall can still
+    /// undo a fix).
+    /// </summary>
+    public override void OnUninstalling()
+    {
+        try
+        {
+            File.Delete(ConfigurationFilePath);
+        }
+        catch (IOException)
+        {
+        }
+        catch (UnauthorizedAccessException)
+        {
+        }
+
+        base.OnUninstalling();
+    }
 }

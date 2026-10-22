@@ -25,11 +25,13 @@ TARGETS = [
     {"tfm": "net9.0", "targetAbi": "10.11.0.0", "label": "jellyfin-10.11"},
 ]
 
+# ⚠ Kale Share (invitations) is TestFlight-only: name it here, in Plugin.Description and on
+# getkale.app/jellyfin only once it ships in the App Store version.
 OVERVIEW = "Easy requests and soundtrack fixes for the Kale app"
-DESCRIPTION = ("Lets everyone in your household ask for films and shows from the Kale app through "
-               "your Seerr, with no Seerr sign-in on each device; the Seerr API key stays on this "
-               "server. Also lets an admin make a file's default soundtrack the right one, in place, "
-               "with undo. Source: GPL-3.0-or-later.")
+DESCRIPTION = ("Optional extras for the Kale app; Kale works without it. Everyone in your household can "
+               "ask for films and shows through your Seerr, with no Seerr sign-in on each device; the Seerr "
+               "API key stays on this server. An admin can make a file's default soundtrack the right one, "
+               "in place, with undo. Source: GPL-3.0-or-later.")
 
 
 def version():
@@ -40,8 +42,8 @@ def version():
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--base-url", required=True, help="where the zips will be served from, no trailing slash")
-    ap.add_argument("--changelog", default="First release: requests from Kale without a Seerr sign-in on each device; "
-                                           "make a soundtrack the file's default, in place, with undo.")
+    ap.add_argument("--changelog", default="Uninstalling now also removes the plugin's settings, including the Seerr key. "
+                                           "Groundwork for a coming Kale feature.")
     ap.add_argument("--out", default=DIST, help="output folder (default dist); the sandbox install test uses its own")
     args = ap.parse_args()
     out = os.path.abspath(args.out)
