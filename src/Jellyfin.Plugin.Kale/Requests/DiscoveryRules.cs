@@ -208,6 +208,28 @@ public sealed class CertificationLadder
 
     /// <summary>A cap given as a score alone.</summary>
     public string? CertificationFor(int score, MediaKind kind) => CertificationFor(new RatingLevel(score), kind);
+
+    /// <summary>
+    /// Every certificate at or below <paramref name="top"/> for this kind, strictest first; null when
+    /// the ladder doesn't name it (kale#347). TMDB orders <c>NR</c> BELOW <c>G</c>, so
+    /// <c>certificationLte</c> alone admits every unrated film; this list, sent as TMDB's
+    /// <c>certification</c>, leaves it out. A name TMDB doesn't carry matches nothing: it errs strict.
+    /// </summary>
+    public IReadOnlyList<string>? CertificationsUpTo(string top, MediaKind kind)
+    {
+        var ladder = kind == MediaKind.Movie ? _films : _television;
+        var at = ladder.Where(e => e.Value == top).Select(e => (RatingLevel?)e.Key).FirstOrDefault();
+        if (at is not { } level)
+        {
+            return null;
+        }
+
+        return ladder
+            .Where(e => (e.Key.Score, e.Key.SubScore ?? 0).CompareTo((level.Score, level.SubScore ?? 0)) <= 0)
+            .OrderBy(e => e.Key.Score).ThenBy(e => e.Key.SubScore ?? 0)
+            .Select(e => e.Value)
+            .ToList();
+    }
 }
 
 /// <summary>Reads a title's certification for one country out of Seerr's movie/tv detail body.</summary>
@@ -355,6 +377,22 @@ public sealed class MemberRules
         }
 
         return (null, server, Country);
+    }
+
+    /// <summary>
+    /// The certificates themselves, pipe-joined for TMDB's <c>certification</c>, when this member is
+    /// capped and HIDES UNRATED (kale#347) — the default for a cap. Measured on the sandbox Seerr
+    /// 2026-10-23: Coming Soon at PG with the pair alone was 10 unrated films in 20, Top Rated 6 in 20;
+    /// with <c>certification=G|PG</c>, none. Null for an uncapped member or one who shows unrated.
+    /// </summary>
+    public string? RatedOnly(MediaKind kind, string certification)
+    {
+        if (Scope.Cap is null || Scope.ShowsUnrated || Ladder.CertificationsUpTo(certification, kind) is not { Count: > 0 } names)
+        {
+            return null;
+        }
+
+        return string.Join('|', names);
     }
 
     /// <summary>Detail: refused only when the title's rating is KNOWN and above the cap.</summary>

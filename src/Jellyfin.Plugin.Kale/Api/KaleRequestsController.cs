@@ -169,8 +169,37 @@ public partial class KaleRequestsController : ControllerBase
             return Refuse(refusal);
         }
 
+        var rules = _rules.For(user);
+        var (path, q) = BrowseCall(
+            k,
+            upcoming,
+            asked.Select(a => new KeyValuePair<string, string>(a.Key, a.Value.ToString())),
+            certification,
+            certification is null ? null : country ?? rules.Country,
+            certification is null ? null : rules.RatedOnly(k, certification),
+            DateTime.UtcNow);
+        return Answer(await _broker.AsUser(user.Id, HttpMethod.Get, path, q, cancellationToken: ct).ConfigureAwait(false));
+    }
+
+    /// <summary>
+    /// The Seerr call for one browse row, once the cap is decided.
+    /// <para>⚠ A capped Upcoming goes to <c>discover/movies</c> from today (kale#347): Seerr's
+    /// <c>/discover/movies/upcoming</c> refuses any certification with 400 (which reached the app as a
+    /// 502 and left a capped viewer with no Coming Soon), and it IS <c>discover/movies</c> with
+    /// <c>primaryReleaseDateGte</c> = today — measured 2026-10-23, 3,843 films both ways, the same first
+    /// page. An uncapped Upcoming keeps Seerr's route.</para>
+    /// </summary>
+    internal static (string Path, List<KeyValuePair<string, string>> Query) BrowseCall(
+        MediaKind kind,
+        bool upcoming,
+        IEnumerable<KeyValuePair<string, string>> asked,
+        string? certification,
+        string? country,
+        string? ratedOnly,
+        DateTime nowUtc)
+    {
         var q = new List<KeyValuePair<string, string>>();
-        foreach (var (name, values) in asked)
+        foreach (var (name, value) in asked)
         {
             // Never the app's certification pair (decided above), and only plain parameter names.
             if (name.StartsWith("certification", StringComparison.OrdinalIgnoreCase) || !ParameterName().IsMatch(name))
@@ -178,7 +207,6 @@ public partial class KaleRequestsController : ControllerBase
                 continue;
             }
 
-            var value = values.ToString();
             if (value.Length <= 200)
             {
                 q.Add(new(name, value));
@@ -192,12 +220,23 @@ public partial class KaleRequestsController : ControllerBase
 
         if (certification is not null)
         {
-            q.Add(new("certificationCountry", country ?? _rules.For(user).Country));
+            q.Add(new("certificationCountry", country!));
             q.Add(new("certificationLte", certification));
+            if (ratedOnly is not null)
+            {
+                q.Add(new("certification", ratedOnly));
+            }
         }
 
-        var path = upcoming ? "api/v1/discover/movies/upcoming" : (k == MediaKind.Movie ? "api/v1/discover/movies" : "api/v1/discover/tv");
-        return Answer(await _broker.AsUser(user.Id, HttpMethod.Get, path, q, cancellationToken: ct).ConfigureAwait(false));
+        if (upcoming && certification is not null)
+        {
+            q.RemoveAll(kv => kv.Key == "primaryReleaseDateGte");
+            q.Add(new("primaryReleaseDateGte", nowUtc.ToString("yyyy-MM-dd", System.Globalization.CultureInfo.InvariantCulture)));
+            return ("api/v1/discover/movies", q);
+        }
+
+        var path = upcoming ? "api/v1/discover/movies/upcoming" : (kind == MediaKind.Movie ? "api/v1/discover/movies" : "api/v1/discover/tv");
+        return (path, q);
     }
 
     /// <summary>Genre names and ids, for matching browse rows to the library.</summary>
