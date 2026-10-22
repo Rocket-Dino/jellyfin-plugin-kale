@@ -39,6 +39,19 @@ public sealed class ShareGrant
     /// so the link itself carries one key however many devices it admits.
     /// </summary>
     public string? Spares { get; set; }
+
+    /// <summary>
+    /// Set on a guest's own grant (<see cref="ShareGrants.CreateSelf"/>): the device that made it, for
+    /// another of the same person's devices. Null on an invitation the owner made.
+    /// </summary>
+    public string? FromDevice { get; set; }
+}
+
+public enum SelfGrantOutcome
+{
+    Created,
+    Invalid,
+    TooMany,
 }
 
 public enum RedeemOutcome
@@ -67,6 +80,15 @@ public sealed class ShareGrants
 
     /// <summary>Largest sealed spares blob accepted (five keys sealed are well under 1 KB).</summary>
     public const int MaxSparesLength = 4096;
+
+    /// <summary>
+    /// A guest's own grant lives one day: the app's hand-off window (KaleShareAddDevice.approvalWindow).
+    /// The server decides it; the caller cannot ask for longer.
+    /// </summary>
+    public static readonly TimeSpan SelfLifetime = TimeSpan.FromHours(24);
+
+    /// <summary>Open own grants one person may hold at once: the per-invitation device cap (ADR-020 §3).</summary>
+    public const int MaxOpenSelfGrants = 5;
 
     /// <summary>How long a finished grant stays listed for the owner before it is dropped.</summary>
     public static readonly TimeSpan KeepFinished = TimeSpan.FromDays(30);
@@ -137,6 +159,77 @@ public sealed class ShareGrants
             grants.Add(grant);
             _save(grants);
             return grant;
+        }
+    }
+
+    /// <summary>
+    /// A signed-in person's one-time sign-in for another of THEIR OWN devices (Add Another Device):
+    /// always for <paramref name="userId"/> (the caller, never a body field), one day, single use, and
+    /// at most <see cref="MaxOpenSelfGrants"/> open at once. Labelled like the owner's newest invitation
+    /// for the same account, so the owner's app files it under the same guest; else
+    /// <paramref name="fallbackLabel"/> (the account's name).
+    /// </summary>
+    public (SelfGrantOutcome Outcome, ShareGrant? Grant) CreateSelf(Guid userId, string secretHash, string fromDevice, string fallbackLabel)
+    {
+        var now = _now();
+        var hash = secretHash.Trim().ToLowerInvariant();
+        var device = fromDevice.Trim();
+        if (userId == Guid.Empty || !IsHash(hash) || device.Length == 0)
+        {
+            return (SelfGrantOutcome.Invalid, null);
+        }
+
+        lock (_gate)
+        {
+            var grants = Pruned(_load(), now);
+            if (grants.Any(g => g.SecretHash == hash))
+            {
+                return (SelfGrantOutcome.Invalid, null);
+            }
+
+            var open = grants.Count(g => g.UserId == userId && g.FromDevice is not null && g.RedeemedUtc is null && g.ExpiresUtc > now);
+            if (open >= MaxOpenSelfGrants)
+            {
+                return (SelfGrantOutcome.TooMany, null);
+            }
+
+            var label = grants.Where(g => g.UserId == userId && g.FromDevice is null)
+                .OrderByDescending(g => g.CreatedUtc)
+                .Select(g => g.Label)
+                .FirstOrDefault(l => !string.IsNullOrWhiteSpace(l)) ?? fallbackLabel.Trim();
+            var grant = new ShareGrant
+            {
+                Id = Guid.NewGuid(),
+                UserId = userId,
+                SecretHash = hash,
+                Label = label,
+                CreatedUtc = now,
+                ExpiresUtc = now + SelfLifetime,
+                FromDevice = device.Length > 100 ? device[..100] : device,
+            };
+            grants.Add(grant);
+            _save(grants);
+            return (SelfGrantOutcome.Created, grant);
+        }
+    }
+
+    /// <summary>One person's own grants: what their devices made, never the owner's invitations.</summary>
+    public IReadOnlyList<ShareGrant> ListOwn(Guid userId) =>
+        List().Where(g => g.UserId == userId && g.FromDevice is not null).ToList();
+
+    /// <summary>Withdraw one of this person's own grants. Another person's, or an owner's invitation, is not theirs.</summary>
+    public bool WithdrawOwn(Guid userId, Guid id)
+    {
+        lock (_gate)
+        {
+            var grants = _load();
+            var removed = grants.RemoveAll(g => g.Id == id && g.UserId == userId && g.FromDevice is not null) > 0;
+            if (removed)
+            {
+                _save(grants);
+            }
+
+            return removed;
         }
     }
 

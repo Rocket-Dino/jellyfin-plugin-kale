@@ -3,6 +3,7 @@ using System.Net.Mime;
 using System.Reflection;
 using Jellyfin.Plugin.Kale.Repair;
 using MediaBrowser.Common.Api;
+using MediaBrowser.Controller.Configuration;
 using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Http;
 using Microsoft.AspNetCore.Mvc;
@@ -21,10 +22,12 @@ namespace Jellyfin.Plugin.Kale.Api;
 public class KaleController : ControllerBase
 {
     private readonly DefaultAudioRepair _repair;
+    private readonly IServerConfigurationManager _config;
 
-    public KaleController(DefaultAudioRepair repair)
+    public KaleController(DefaultAudioRepair repair, IServerConfigurationManager config)
     {
         _repair = repair;
+        _config = config;
     }
 
     /// <summary>
@@ -38,7 +41,7 @@ public class KaleController : ControllerBase
         Version = typeof(KaleController).Assembly.GetName().Version?.ToString(),
         Repairs = new[] { "defaultAudio" },
         Requests = new { Configured = Plugin.Instance?.Configuration.Seerr is not null },
-        Share = new { Grants = true },
+        Share = new { Grants = true, SelfGrants = KaleShareController.SelfGrantsAllowed(_config) },
     };
 
     /// <summary>Would making this audio stream the default work? Reads the file; writes nothing.</summary>
