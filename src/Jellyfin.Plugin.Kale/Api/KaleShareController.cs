@@ -6,6 +6,7 @@ using Jellyfin.Data;
 using Jellyfin.Database.Implementations.Enums;
 using Jellyfin.Plugin.Kale.Share;
 using MediaBrowser.Common.Api;
+using MediaBrowser.Controller.Configuration;
 using MediaBrowser.Controller.Library;
 using MediaBrowser.Controller.Net;
 using MediaBrowser.Controller.Session;
@@ -21,6 +22,9 @@ public sealed record CreateGrantBody(Guid UserId, string? SecretHash, string? La
 
 /// <summary>The body of <c>PUT /Kale/Share/Grants/{id}/Spares</c>: the sealed keys, base64.</summary>
 public sealed record SparesBody(string? Spares);
+
+/// <summary>The body of <c>POST /Kale/Share/SelfGrants</c>: the hash of a secret the caller's own app made.</summary>
+public sealed record SelfGrantBody(string? SecretHash);
 
 /// <summary>The body of <c>POST /Kale/Share/Redeem</c>: the secret from the invitation, as hex.</summary>
 public sealed record RedeemBody(string? Secret);
@@ -40,16 +44,27 @@ public class KaleShareController : ControllerBase
     private readonly IUserManager _users;
     private readonly ISessionManager _sessions;
     private readonly IAuthorizationContext _auth;
+    private readonly IServerConfigurationManager _config;
     private readonly ILogger<KaleShareController> _logger;
 
-    public KaleShareController(ShareGrants grants, IUserManager users, ISessionManager sessions, IAuthorizationContext auth, ILogger<KaleShareController> logger)
+    public KaleShareController(ShareGrants grants, IUserManager users, ISessionManager sessions, IAuthorizationContext auth,
+        IServerConfigurationManager config, ILogger<KaleShareController> logger)
     {
         _grants = grants;
         _users = users;
         _sessions = sessions;
         _auth = auth;
+        _config = config;
         _logger = logger;
     }
+
+    /// <summary>
+    /// Whether a signed-in person may make a sign-in for another of their own devices: exactly when
+    /// Quick Connect is on, because that is the server's existing answer to the same question (any
+    /// signed-in user may approve a Quick Connect code for their own account). An admin who turned
+    /// Quick Connect off has said no to both.
+    /// </summary>
+    public static bool SelfGrantsAllowed(IServerConfigurationManager config) => config.Configuration.QuickConnectAvailable;
 
     /// <summary>Register an invitation's sign-in for one account. Admin only.</summary>
     [HttpPost("Grants")]
@@ -87,6 +102,7 @@ public class KaleShareController : ControllerBase
             g.ExpiresUtc,
             g.RedeemedUtc,
             g.RedeemedDeviceName,
+            g.FromDevice,
         }).ToList();
 
     /// <summary>Attach the invitation's sealed keys for the guest's other devices. Admin only.</summary>
@@ -103,6 +119,88 @@ public class KaleShareController : ControllerBase
     [ProducesResponseType(StatusCodes.Status204NoContent)]
     [ProducesResponseType(StatusCodes.Status404NotFound)]
     public ActionResult WithdrawGrant([FromRoute] Guid id) => _grants.Withdraw(id) ? NoContent() : NotFound();
+
+    /// <summary>
+    /// A one-time sign-in for another of the CALLER's own devices (Add Another Device). Any signed-in
+    /// person, for their own account only: the account is the session's, never a body field. One day,
+    /// single use, at most five open. No more than Quick Connect already lets them do, and only while
+    /// it is on (<see cref="SelfGrantsAllowed"/>).
+    /// </summary>
+    [HttpPost("SelfGrants")]
+    [Authorize]
+    [ProducesResponseType(StatusCodes.Status200OK)]
+    [ProducesResponseType(StatusCodes.Status400BadRequest)]
+    [ProducesResponseType(StatusCodes.Status403Forbidden)]
+    [ProducesResponseType(StatusCodes.Status409Conflict)]
+    public async Task<ActionResult<object>> CreateSelfGrant([FromBody] SelfGrantBody body)
+    {
+        var info = await _auth.GetAuthorizationInfo(Request).ConfigureAwait(false);
+        if (info.IsApiKey || info.User is null)
+        {
+            return StatusCode(StatusCodes.Status403Forbidden, new { Reason = "noUser" });
+        }
+
+        if (info.User.HasPermission(PermissionKind.IsDisabled))
+        {
+            return StatusCode(StatusCodes.Status403Forbidden, new { Reason = "accountDisabled" });
+        }
+
+        if (!SelfGrantsAllowed(_config))
+        {
+            return StatusCode(StatusCodes.Status403Forbidden, new { Reason = "quickConnectOff" });
+        }
+
+        var (outcome, grant) = _grants.CreateSelf(info.User.Id, body.SecretHash ?? string.Empty, info.Device ?? string.Empty, info.User.Username);
+        switch (outcome)
+        {
+            case SelfGrantOutcome.TooMany:
+                return Conflict(new { Reason = "tooMany" });
+            case SelfGrantOutcome.Invalid:
+                return BadRequest(new { Reason = "invalidGrant" });
+        }
+
+        _logger.LogInformation("Kale Share: user {User} made a sign-in {Grant} for another of their devices, from {Device}", grant!.UserId, grant.Id, grant.FromDevice);
+        return new { grant.Id, grant.ExpiresUtc };
+    }
+
+    /// <summary>The caller's own device sign-ins, without hashes.</summary>
+    [HttpGet("SelfGrants")]
+    [Authorize]
+    [ProducesResponseType(StatusCodes.Status200OK)]
+    public async Task<ActionResult<object>> ListSelfGrants()
+    {
+        var info = await _auth.GetAuthorizationInfo(Request).ConfigureAwait(false);
+        if (info.IsApiKey || info.User is null)
+        {
+            return StatusCode(StatusCodes.Status403Forbidden, new { Reason = "noUser" });
+        }
+
+        return _grants.ListOwn(info.User.Id).Select(g => new
+        {
+            g.Id,
+            g.CreatedUtc,
+            g.ExpiresUtc,
+            g.RedeemedUtc,
+            g.RedeemedDeviceName,
+            g.FromDevice,
+        }).ToList();
+    }
+
+    /// <summary>Withdraw one of the caller's own device sign-ins. Anyone else's is not found.</summary>
+    [HttpDelete("SelfGrants/{id}")]
+    [Authorize]
+    [ProducesResponseType(StatusCodes.Status204NoContent)]
+    [ProducesResponseType(StatusCodes.Status404NotFound)]
+    public async Task<ActionResult> WithdrawSelfGrant([FromRoute] Guid id)
+    {
+        var info = await _auth.GetAuthorizationInfo(Request).ConfigureAwait(false);
+        if (info.IsApiKey || info.User is null)
+        {
+            return StatusCode(StatusCodes.Status403Forbidden, new { Reason = "noUser" });
+        }
+
+        return _grants.WithdrawOwn(info.User.Id, id) ? NoContent() : NotFound();
+    }
 
     /// <summary>
     /// Sign in with an invitation. Anonymous by necessity (the guest has no session yet): the secret is

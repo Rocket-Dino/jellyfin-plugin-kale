@@ -29,7 +29,7 @@ public class ShareGrantsTests
     {
         Id = g.Id, UserId = g.UserId, SecretHash = g.SecretHash, Label = g.Label, CreatedUtc = g.CreatedUtc,
         ExpiresUtc = g.ExpiresUtc, RedeemedUtc = g.RedeemedUtc, RedeemedDeviceId = g.RedeemedDeviceId,
-        RedeemedDeviceName = g.RedeemedDeviceName, Spares = g.Spares,
+        RedeemedDeviceName = g.RedeemedDeviceName, Spares = g.Spares, FromDevice = g.FromDevice,
     };
 
     private ShareGrant Invite(ShareGrants grants, TimeSpan? lifetime = null) =>
@@ -166,6 +166,104 @@ public class ShareGrantsTests
         Assert.Empty(grants.List());
         Assert.Empty(_stored);
     }
+
+    // MARK: a guest's own devices (Add Another Device, plugin 0.4.0)
+
+    private const string Other = "ffeeddccbbaa99887766554433221100";
+    private static readonly Guid Sam = Guid.Parse("1b2c3d4e-0000-4000-8000-000000000002");
+
+    private (SelfGrantOutcome Outcome, ShareGrant? Grant) Own(ShareGrants grants, Guid user, string secret, string device = "Alex's iPhone") =>
+        grants.CreateSelf(user, ShareGrants.HashOf(secret)!, device, "alexguest");
+
+    [Fact]
+    public void AnOwnGrantSignsInTheSamePersonOnceAndOnlyForADay()
+    {
+        var grants = Grants();
+        var (outcome, made) = Own(grants, Alex, Other);
+        Assert.Equal(SelfGrantOutcome.Created, outcome);
+        Assert.Equal(_now + ShareGrants.SelfLifetime, made!.ExpiresUtc);
+        Assert.Equal("Alex's iPhone", made.FromDevice);
+
+        var (signIn, grant, _) = grants.Redeem(Other, "alex-ipad", "Alex's iPad");
+        Assert.Equal(RedeemOutcome.SignIn, signIn);
+        Assert.Equal(Alex, grant!.UserId);
+        Assert.Equal(RedeemOutcome.Used, grants.Redeem(Other, "stranger", "Forwarded").Outcome);
+    }
+
+    [Fact]
+    public void AnOwnGrantExpiresAfterADay()
+    {
+        var grants = Grants();
+        Own(grants, Alex, Other);
+        _now += ShareGrants.SelfLifetime;
+        Assert.Equal(RedeemOutcome.Expired, grants.Redeem(Other, "alex-ipad", "Alex's iPad").Outcome);
+    }
+
+    [Fact]
+    public void OnePersonHoldsAtMostFiveOpenOwnGrants()
+    {
+        var grants = Grants();
+        for (var i = 0; i < ShareGrants.MaxOpenSelfGrants; i++)
+        {
+            Assert.Equal(SelfGrantOutcome.Created, Own(grants, Alex, $"{i:x2}112233445566778899aabbccddeeff").Outcome);
+        }
+
+        Assert.Equal(SelfGrantOutcome.TooMany, Own(grants, Alex, Other).Outcome);
+        Assert.Equal(SelfGrantOutcome.Created, Own(grants, Sam, Other).Outcome); // per person
+        grants.Redeem("00112233445566778899aabbccddeeff", "alex-ipad", "Alex's iPad");
+        Assert.Equal(SelfGrantOutcome.Created, Own(grants, Alex, "aa" + Other[2..]).Outcome); // a used one frees a place
+    }
+
+    [Fact]
+    public void AnOwnGrantTakesTheOwnersLabelForThatPerson()
+    {
+        var grants = Grants();
+        Invite(grants); // the owner's invitation for Alex, labelled "Alex"
+        Assert.Equal("Alex", Own(grants, Alex, Other).Grant!.Label);
+        Assert.Equal("alexguest", Own(grants, Sam, "aa" + Other[2..]).Grant!.Label); // no invitation: the account's name
+    }
+
+    [Fact]
+    public void APersonSeesAndWithdrawsOnlyTheirOwnGrants()
+    {
+        var grants = Grants();
+        Invite(grants);
+        var alexs = Own(grants, Alex, Other).Grant!;
+        var sams = Own(grants, Sam, "aa" + Other[2..]).Grant!;
+
+        Assert.Equal(new[] { alexs.Id }, grants.ListOwn(Alex).Select(g => g.Id));
+        Assert.False(grants.WithdrawOwn(Alex, sams.Id), "someone else's");
+        var invitation = _stored.Single(g => g.FromDevice is null);
+        Assert.False(grants.WithdrawOwn(Alex, invitation.Id), "the owner's invitation is not hers to withdraw");
+        Assert.True(grants.WithdrawOwn(Alex, alexs.Id));
+        Assert.Equal(2, _stored.Count);
+    }
+
+    [Theory]
+    [InlineData("")]
+    [InlineData("   ")]
+    public void AnOwnGrantNamesTheDeviceThatMadeIt(string device) =>
+        Assert.Equal(SelfGrantOutcome.Invalid, Own(Grants(), Alex, Other, device).Outcome);
+
+    [Fact]
+    public void NobodyMakesAnOwnGrantForNoAccount() =>
+        Assert.Equal(SelfGrantOutcome.Invalid, Grants().CreateSelf(Guid.Empty, ShareGrants.HashOf(Other)!, "iPhone", "x").Outcome);
+
+    [Theory]
+    [InlineData(nameof(KaleShareController.CreateSelfGrant))]
+    [InlineData(nameof(KaleShareController.ListSelfGrants))]
+    [InlineData(nameof(KaleShareController.WithdrawSelfGrant))]
+    public void OwnGrantsNeedASessionButNotAnAdmin(string action)
+    {
+        var method = typeof(KaleShareController).GetMethod(action)!;
+        Assert.Null(method.GetCustomAttribute<AllowAnonymousAttribute>());
+        var authorize = Assert.Single(method.GetCustomAttributes<AuthorizeAttribute>());
+        Assert.Null(authorize.Policy);
+    }
+
+    [Fact]
+    public void TheOwnGrantBodyHasNoAccountToName() =>
+        Assert.DoesNotContain(typeof(SelfGrantBody).GetProperties(), p => p.PropertyType == typeof(Guid) || p.Name.Contains("User", StringComparison.Ordinal));
 
     [Theory]
     [InlineData(nameof(KaleShareController.CreateGrant))]
