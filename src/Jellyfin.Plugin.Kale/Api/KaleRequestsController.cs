@@ -406,6 +406,32 @@ public partial class KaleRequestsController : ControllerBase
         }, cancellationToken: ct).ConfigureAwait(false));
     }
 
+    /// <summary>
+    /// What the household has hidden, newest first (kale#210). Seerr decides who may see it
+    /// (MANAGE_BLOCKLIST or VIEW_BLOCKLIST); its 403 comes back as <c>notAllowed</c>. Only paging
+    /// is forwarded.
+    /// </summary>
+    [HttpGet("Blocklist")]
+    public async Task<ActionResult> Hidden([FromQuery] int? take, [FromQuery] int? skip, CancellationToken ct)
+    {
+        if (await CallerAsync().ConfigureAwait(false) is not { } user)
+        {
+            return Refuse(BrokerRefusal.NeedsAPerson);
+        }
+
+        if (take is < 1 or > 100 || skip is < 0)
+        {
+            return Refuse(BrokerRefusal.BadRequest);
+        }
+
+        var q = new[]
+        {
+            new KeyValuePair<string, string>("take", (take ?? 50).ToString(System.Globalization.CultureInfo.InvariantCulture)),
+            new KeyValuePair<string, string>("skip", (skip ?? 0).ToString(System.Globalization.CultureInfo.InvariantCulture)),
+        };
+        return Answer(await _broker.AsUser(user.Id, HttpMethod.Get, "api/v1/blocklist", q, cancellationToken: ct).ConfigureAwait(false));
+    }
+
     /// <summary>Show a hidden title again.</summary>
     [HttpDelete("Blocklist/{tmdbId:int}")]
     public async Task<ActionResult> Unblock([FromRoute] int tmdbId, [FromQuery] string? mediaType, CancellationToken ct)

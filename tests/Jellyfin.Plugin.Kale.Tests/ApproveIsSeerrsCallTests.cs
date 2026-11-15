@@ -44,6 +44,7 @@ public class ApproveIsSeerrsCallTests
     [InlineData(nameof(KaleRequestsController.Approve))]
     [InlineData(nameof(KaleRequestsController.Decline))]
     [InlineData(nameof(KaleRequestsController.Pending))]
+    [InlineData(nameof(KaleRequestsController.Hidden))]
     public void AnsweringAnAskIsNotGatedOnBeingAJellyfinAdmin(string action)
     {
         // ASP.NET enforces this attribute before the action runs: while it is there, a non-admin
@@ -108,6 +109,41 @@ public class ApproveIsSeerrsCallTests
         {
             ControllerContext = new ControllerContext { HttpContext = new DefaultHttpContext() },
         };
+    }
+
+    /// <summary>kale#210: the hidden list goes out as the caller, with only paging forwarded.</summary>
+    [Fact]
+    public async Task TheHiddenListIsAskedAsTheCallerWithItsPaging()
+    {
+        var seerr = new FakeSeerr { AnswerBody = "{\"pageInfo\":{\"results\":0},\"results\":[]}" };
+        var result = await Controller(seerr).Hidden(50, 50, CancellationToken.None);
+        Assert.Equal(200, Assert.IsType<ContentResult>(result).StatusCode);
+        var list = seerr.Seen.Single(r => r.RequestUri!.AbsolutePath == "/api/v1/blocklist");
+        Assert.Equal(HttpMethod.Get, list.Method);
+        Assert.Equal("?take=50&skip=50", list.RequestUri!.Query);
+        Assert.Equal("12", list.Headers.GetValues("X-API-User").Single());
+    }
+
+    [Fact]
+    public async Task SeerrRefusingTheHiddenListIsNotAllowed()
+    {
+        var seerr = new FakeSeerr { AnswerStatus = HttpStatusCode.Forbidden, AnswerBody = "{\"message\":\"You do not have permission to access this endpoint.\"}" };
+        var result = await Controller(seerr).Hidden(null, null, CancellationToken.None);
+        var answer = Assert.IsType<ObjectResult>(result);
+        Assert.Equal(403, answer.StatusCode);
+        Assert.Equal(BrokerRefusal.NotAllowed, answer.Value);
+    }
+
+    [Theory]
+    [InlineData(0, 0)]
+    [InlineData(500, 0)]
+    [InlineData(50, -1)]
+    public async Task AHiddenListPageOutOfRangeIsABadRequest(int take, int skip)
+    {
+        var seerr = new FakeSeerr();
+        var result = await Controller(seerr).Hidden(take, skip, CancellationToken.None);
+        Assert.Equal(400, Assert.IsType<ObjectResult>(result).StatusCode);
+        Assert.DoesNotContain(seerr.Seen, r => r.RequestUri!.AbsolutePath == "/api/v1/blocklist");
     }
 
     [Fact]
