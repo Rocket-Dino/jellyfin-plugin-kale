@@ -40,6 +40,29 @@ public class PluginConfiguration : BasePluginConfiguration
     [JsonIgnore]
     public List<ShareGrant> ShareGrants { get; set; } = new();
 
+    /// <summary>
+    /// Sharing through the Kale doorway is on (kale#373). The doorway itself may run only while
+    /// <c>GET /Kale/Share/Doorway</c> says <c>CanStart</c>.
+    /// </summary>
+    public bool DoorwayEnabled { get; set; }
+
+    /// <summary>
+    /// The Known Proxies entries Kale itself appended to Jellyfin's list, so turning sharing off or
+    /// uninstalling removes exactly those and never an entry the owner made. Not secret.
+    /// </summary>
+    public List<string> DoorwayKnownProxies { get; set; } = new();
+
+    /// <summary>
+    /// The LAN-network exclusions (<c>!&lt;address&gt;</c>) Kale appended for a guest classed local
+    /// (<c>POST /Kale/Share/GuestLocality/Exclude</c>). Kept as a record for undoing by hand; deliberately NOT
+    /// removed on uninstall: they keep guests remote, and the server works either way.
+    /// </summary>
+    public List<string> LanExclusionsAdded { get; set; } = new();
+
+    /// <summary>Kale Share guests' last local and remote sightings (ADR-020 §1c point 6). Addresses, not secrets.</summary>
+    [JsonIgnore]
+    public List<GuestSighting> GuestSightings { get; set; } = new();
+
     /// <summary>Read-merge-write: set the two Seerr fields on THIS configuration, keep everything else.</summary>
     public PluginConfiguration WithSeerr(string url, string apiKey)
     {

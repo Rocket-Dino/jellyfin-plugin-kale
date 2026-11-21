@@ -19,11 +19,16 @@
 
   <PropertyGroup Condition="'$(TargetFramework)' == 'net9.0'">
     <JellyfinVersion>10.11.11</JellyfinVersion>
+    <DefineConstants>$(DefineConstants);JF_10_11</DefineConstants>
   </PropertyGroup>
 
   <ItemGroup>
     <PackageReference Include="Jellyfin.Model" Version="$(JellyfinVersion)" />
     <PackageReference Include="Jellyfin.Controller" Version="$(JellyfinVersion)" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <FrameworkReference Include="Microsoft.AspNetCore.App" />
   </ItemGroup>
 
   <ItemGroup>

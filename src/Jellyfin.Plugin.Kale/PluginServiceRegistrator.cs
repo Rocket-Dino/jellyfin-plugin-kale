@@ -16,6 +16,9 @@ public class PluginServiceRegistrator : IPluginServiceRegistrator
     {
         serviceCollection.AddSingleton<DefaultAudioRepair>();
         serviceCollection.AddSingleton<MemberRulesSource>();
+        serviceCollection.AddSingleton<Doorway>();
+        serviceCollection.AddSingleton<GuestLocality>();
+        serviceCollection.AddHostedService(sp => sp.GetRequiredService<GuestLocality>());
         serviceCollection.AddSingleton(_ => new ShareGrants(
             () => Plugin.Instance?.Configuration.ShareGrants ?? new(),
             grants =>
